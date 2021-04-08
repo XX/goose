@@ -1,6 +1,7 @@
 use gumdrop::Options;
 use nng::*;
 use serde::{Deserialize, Serialize};
+use std::io::BufWriter;
 use std::sync::atomic::Ordering;
 use std::{thread, time};
 use url::Url;
@@ -9,7 +10,7 @@ const EMPTY_ARGS: Vec<&str> = vec![];
 
 use crate::goose::{GooseUser, GooseUserCommand};
 use crate::manager::GooseUserInitializer;
-use crate::metrics::{GooseRequestMetrics, GooseTaskMetrics};
+use crate::metrics::{GooseErrorMetrics, GooseRequestMetrics, GooseTaskMetrics};
 use crate::{get_worker_id, AttackMode, GooseAttack, GooseConfiguration, WORKER_ID};
 
 /// Workers send GaggleMetrics to the Manager process to be aggregated together.
@@ -21,6 +22,8 @@ pub enum GaggleMetrics {
     Requests(GooseRequestMetrics),
     /// Goose task metrics.
     Tasks(GooseTaskMetrics),
+    /// Goose error metrics.
+    Errors(GooseErrorMetrics),
 }
 
 // If pipe closes unexpectedly, panic.
@@ -246,14 +249,18 @@ pub fn push_metrics_to_manager(
     get_response: bool,
 ) -> bool {
     debug!("[{}] pushing metrics to manager", get_worker_id(),);
-    let mut message = Message::new();
+    let mut message = BufWriter::new(Message::new());
 
     serde_cbor::to_writer(&mut message, &metrics)
         .map_err(|error| eprintln!("{:?} worker_id({})", error, get_worker_id()))
         .expect("failed to serialize GaggleMetrics");
 
     manager
-        .try_send(message)
+        .try_send(
+            message
+                .into_inner()
+                .expect("failed to extract nng message from buffer"),
+        )
         .map_err(|error| eprintln!("{:?} worker_id({})", error, get_worker_id()))
         .expect("communication failure");
 

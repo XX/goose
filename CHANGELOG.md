@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.10.9-dev
+## 0.10.10-dev
+ - capture errors and count frequency for each, including summary in metrics report; optionally disable with `--no-error-summary`
+
+## 0.10.9 March 23, 2021
+ - avoid unnecessary work on Manager when starting a Gaggle
+ - respect `--hatch-rate` when starting a Gaggle
+ - update httpmock for running tests
+ - remove unnecessary `Result()` types where no error was possible
 
 ## 0.10.8 Feb 13, 2021
  - introduce `--report-file` (and `GooseDefault::ReportFile`) to optionally generate an HTML report when the load test completes

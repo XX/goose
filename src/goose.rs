@@ -669,6 +669,8 @@ pub struct GooseRawRequest {
     pub update: bool,
     /// Which GooseUser thread processed the request.
     pub user: usize,
+    /// The optional error caused by this request.
+    pub error: String,
 }
 impl GooseRawRequest {
     pub fn new(method: GooseMethod, name: &str, url: &str, elapsed: u128, user: usize) -> Self {
@@ -684,6 +686,7 @@ impl GooseRawRequest {
             success: true,
             update: false,
             user,
+            error: "".to_string(),
         }
     }
 
@@ -879,6 +882,44 @@ impl GooseDebug {
             header: header.map(|h| format!("{:?}", h)),
             // If header is defined, convert from &str to string.
             body: body.map(|b| b.to_string()),
+        }
+    }
+}
+
+/// The elements needed to build an individual user state on a Gaggle Worker.
+#[derive(Debug, Clone)]
+pub struct GaggleUser {
+    /// An index into the internal `GooseTest.task_sets` vector, indicating which GooseTaskSet is running.
+    pub task_sets_index: usize,
+    /// The base URL to prepend to all relative paths.
+    pub base_url: Arc<RwLock<Url>>,
+    /// Minimum amount of time to sleep after running a task.
+    pub min_wait: usize,
+    /// Maximum amount of time to sleep after running a task.
+    pub max_wait: usize,
+    /// A local copy of the global GooseConfiguration.
+    pub config: GooseConfiguration,
+    /// Load test hash.
+    pub load_test_hash: u64,
+}
+impl GaggleUser {
+    /// Create a new user state.
+    pub fn new(
+        task_sets_index: usize,
+        base_url: Url,
+        min_wait: usize,
+        max_wait: usize,
+        configuration: &GooseConfiguration,
+        load_test_hash: u64,
+    ) -> Self {
+        trace!("new gaggle user");
+        GaggleUser {
+            task_sets_index,
+            base_url: Arc::new(RwLock::new(base_url)),
+            min_wait,
+            max_wait,
+            config: configuration.clone(),
+            load_test_hash,
         }
     }
 }
@@ -1491,6 +1532,7 @@ impl GooseUser {
                 // @TODO: match/handle all is_foo() https://docs.rs/http/0.2.1/http/status/struct.StatusCode.html
                 if !status_code.is_success() {
                     raw_request.success = false;
+                    raw_request.error = format!("{}: {}", status_code, &path);
                 }
                 raw_request.set_status_code(Some(status_code));
                 raw_request.set_final_url(r.url().as_str());
@@ -1518,6 +1560,7 @@ impl GooseUser {
                 warn!("{:?}: {}", &path, e);
                 raw_request.success = false;
                 raw_request.set_status_code(None);
+                raw_request.error = e.to_string();
             }
         };
 
@@ -1623,6 +1666,11 @@ impl GooseUser {
     /// parameters, `header` and `body`, are optional and used to provide more detail in
     /// logs.
     ///
+    /// The value of `tag` will normally be collected into the errors summary table if
+    /// metrics are being displayed. However, if `set_failure` is called multiple times,
+    /// or is called on a request that was already an error, only the first error will
+    /// be collected.
+    ///
     /// This also calls
     /// [`log_debug`](https://docs.rs/goose/*/goose/goose/struct.GooseUser.html#method.log_debug).
     ///
@@ -1669,6 +1717,7 @@ impl GooseUser {
         if request.success {
             request.success = false;
             request.update = true;
+            request.error = tag.to_string();
             self.send_to_parent(GooseMetric::Request(request.clone()))?;
         }
         // Write failure to log, converting `&mut request` to `&request` as needed by `log_debug()`.
@@ -1782,7 +1831,7 @@ impl GooseUser {
     ///
     /// By default, Goose configures two options when building a Reqwest client. The first
     /// configures Goose to report itself as the user agent requesting web pages (ie
-    /// `goose/0.10.8`). The second option configures Reqwest to store cookies, which is
+    /// `goose/0.10.9`). The second option configures Reqwest to store cookies, which is
     /// generally necessary if you aim to simulate logged in users.
     ///
     /// # Default configuration:
@@ -2226,8 +2275,10 @@ mod tests {
     use super::*;
 
     use gumdrop::Options;
-    use httpmock::Method::{GET, POST};
-    use httpmock::{Mock, MockServer};
+    use httpmock::{
+        Method::{GET, POST},
+        MockServer,
+    };
 
     const EMPTY_ARGS: Vec<&str> = vec![];
 
@@ -2762,14 +2813,13 @@ mod tests {
 
         // Set up a mock http server endpoint.
         const INDEX_PATH: &str = "/";
-        let index = Mock::new()
-            .expect_method(GET)
-            .expect_path(INDEX_PATH)
-            .return_status(200)
-            .create_on(&server);
+        let index = server.mock(|when, then| {
+            when.method(GET).path(INDEX_PATH);
+            then.status(200);
+        });
 
         // Make a GET request to the mock http server and confirm we get a 200 response.
-        assert_eq!(index.times_called(), 0);
+        assert_eq!(index.hits(), 0);
         let goose = user
             .get(INDEX_PATH)
             .await
@@ -2781,18 +2831,17 @@ mod tests {
         assert_eq!(goose.request.success, true);
         assert_eq!(goose.request.update, false);
         assert_eq!(goose.request.status_code, 200);
-        assert_eq!(index.times_called(), 1);
+        assert_eq!(index.hits(), 1);
 
         const NO_SUCH_PATH: &str = "/no/such/path";
         // Set up a mock http server endpoint.
-        let not_found = Mock::new()
-            .expect_method(GET)
-            .expect_path(NO_SUCH_PATH)
-            .return_status(404)
-            .create_on(&server);
+        let not_found = server.mock(|when, then| {
+            when.method(GET).path(NO_SUCH_PATH);
+            then.status(404);
+        });
 
         // Make an invalid GET request to the mock http server and confirm we get a 404 response.
-        assert_eq!(not_found.times_called(), 0);
+        assert_eq!(not_found.hits(), 0);
         let goose = user
             .get(NO_SUCH_PATH)
             .await
@@ -2804,20 +2853,17 @@ mod tests {
         assert_eq!(goose.request.success, false);
         assert_eq!(goose.request.update, false);
         assert_eq!(goose.request.status_code, 404,);
-        assert_eq!(not_found.times_called(), 1);
+        not_found.assert_hits(1);
 
         // Set up a mock http server endpoint.
         const COMMENT_PATH: &str = "/comment";
-        let comment = Mock::new()
-            .expect_method(POST)
-            .expect_path(COMMENT_PATH)
-            .return_status(200)
-            .expect_body("foo")
-            .return_body("foo")
-            .create_on(&server);
+        let comment = server.mock(|when, then| {
+            when.method(POST).path(COMMENT_PATH).body("foo");
+            then.status(200).body("foo");
+        });
 
         // Make a POST request to the mock http server and confirm we get a 200 OK response.
-        assert_eq!(comment.times_called(), 0);
+        assert_eq!(comment.hits(), 0);
         let goose = user
             .post(COMMENT_PATH, "foo")
             .await
@@ -2832,6 +2878,6 @@ mod tests {
         assert_eq!(goose.request.success, true);
         assert_eq!(goose.request.update, false);
         assert_eq!(goose.request.status_code, 200);
-        assert_eq!(comment.times_called(), 1);
+        comment.assert_hits(1);
     }
 }

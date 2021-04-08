@@ -9,11 +9,11 @@ use goose::GooseConfiguration;
 
 // Paths used in load tests performed during these tests.
 const INDEX_PATH: &str = "/";
-const ABOUT_PATH: &str = "/about.html";
+const A_404_PATH: &str = "/404";
 
 // Indexes to the above paths.
 const INDEX_KEY: usize = 0;
-const ABOUT_KEY: usize = 1;
+const A_404_KEY: usize = 1;
 
 // Load test configuration.
 const EXPECT_WORKERS: usize = 2;
@@ -21,10 +21,10 @@ const EXPECT_WORKERS: usize = 2;
 // There are multiple test variations in this file.
 #[derive(Clone)]
 enum TestType {
-    // Enable --no-reset-metrics.
-    NoResetMetrics,
-    // Do not enable --no-reset-metrics.
-    ResetMetrics,
+    // Enable --no-error-summary.
+    NoErrorSummary,
+    // Do not enable --no-error-summary.
+    ErrorSummary,
 }
 
 // Test task.
@@ -34,8 +34,8 @@ pub async fn get_index(user: &GooseUser) -> GooseTaskResult {
 }
 
 // Test task.
-pub async fn get_about(user: &GooseUser) -> GooseTaskResult {
-    let _goose = user.get(ABOUT_PATH).await?;
+pub async fn get_404_path(user: &GooseUser) -> GooseTaskResult {
+    let _goose = user.get(A_404_PATH).await?;
     Ok(())
 }
 
@@ -50,8 +50,8 @@ fn setup_mock_server_endpoints(server: &MockServer) -> Vec<MockRef> {
     }));
     // Next set up ABOUT_PATH, store in vector at ABOUT_KEY.
     endpoints.push(server.mock(|when, then| {
-        when.method(GET).path(ABOUT_PATH);
-        then.status(200);
+        when.method(GET).path(A_404_PATH);
+        then.status(404);
     }));
 
     endpoints
@@ -67,7 +67,7 @@ fn common_build_configuration(server: &MockServer, custom: &mut Vec<&str>) -> Go
         "4",
         "--run-time",
         "2",
-        "--status-codes",
+        "--no-reset-metrics",
     ];
 
     // Custom elements in some tests.
@@ -78,7 +78,7 @@ fn common_build_configuration(server: &MockServer, custom: &mut Vec<&str>) -> Go
 }
 
 // Helper to confirm all variations generate appropriate results.
-fn validate_one_taskset(
+fn validate_error(
     goose_metrics: &GooseMetrics,
     mock_endpoints: &[MockRef],
     configuration: &GooseConfiguration,
@@ -86,66 +86,59 @@ fn validate_one_taskset(
 ) {
     // Confirm that we loaded the mock endpoints.
     assert!(mock_endpoints[INDEX_KEY].hits() > 0);
-    assert!(mock_endpoints[ABOUT_KEY].hits() > 0);
+    assert!(mock_endpoints[A_404_KEY].hits() > 0);
 
-    // Confirm that we loaded the index roughly three times as much as the about page.
-    let one_third_index = mock_endpoints[INDEX_KEY].hits() / 3;
-    let difference = mock_endpoints[ABOUT_KEY].hits() as i32 - one_third_index as i32;
-    assert!(difference >= -2 && difference <= 2);
-
-    // Get index and about out of goose metrics.
+    // Get request metrics.
     let index_metrics = goose_metrics
         .requests
         .get(&format!("GET {}", INDEX_PATH))
         .unwrap();
-    let about_metrics = goose_metrics
+    let a_404_metrics = goose_metrics
         .requests
-        .get(&format!("GET {}", ABOUT_PATH))
+        .get(&format!("GET {}", A_404_PATH))
         .unwrap();
 
-    // Confirm that the path and method are correct in the statistics.
+    // Get error metrics.
+    let a_404_errors = goose_metrics.errors.clone();
+
+    // Confirm that the path and method are correct in the metrics.
     assert!(index_metrics.path == INDEX_PATH);
     assert!(index_metrics.method == GooseMethod::GET);
-    assert!(about_metrics.path == ABOUT_PATH);
-    assert!(about_metrics.method == GooseMethod::GET);
+    assert!(a_404_metrics.path == A_404_PATH);
+    assert!(a_404_metrics.method == GooseMethod::GET);
 
-    let status_code: u16 = 200;
+    // All requests to the index succeeded.
+    mock_endpoints[INDEX_KEY].assert_hits(index_metrics.response_time_counter);
+    mock_endpoints[INDEX_KEY].assert_hits(index_metrics.success_count);
+    // All requests to the 404 page failed.
+    mock_endpoints[A_404_KEY].assert_hits(a_404_metrics.response_time_counter);
+    mock_endpoints[A_404_KEY].assert_hits(a_404_metrics.fail_count);
+
     match test_type {
-        TestType::ResetMetrics => {
-            // Statistics were reset after all users were started, so Goose should report
-            // fewer page loads than the server actually saw.
-            println!(
-                "response_time_counter: {}, mock_endpoint_called: {}",
-                index_metrics.response_time_counter,
-                mock_endpoints[INDEX_KEY].hits()
-            );
-
-            assert!(index_metrics.response_time_counter < mock_endpoints[INDEX_KEY].hits());
-            assert!(
-                index_metrics.status_code_counts[&status_code] < mock_endpoints[INDEX_KEY].hits()
-            );
-            assert!(index_metrics.success_count < mock_endpoints[INDEX_KEY].hits());
-            assert!(about_metrics.response_time_counter < mock_endpoints[ABOUT_KEY].hits());
-            assert!(
-                about_metrics.status_code_counts[&status_code] < mock_endpoints[ABOUT_KEY].hits()
-            );
-            assert!(about_metrics.success_count < mock_endpoints[ABOUT_KEY].hits());
+        TestType::ErrorSummary => {
+            // The 404 path was captured as an error.
+            assert!(a_404_errors.len() == 1);
+            // Extract the error from the BTreeMap.
+            for error in a_404_errors {
+                // The captured error was a GET request.
+                assert!(error.1.method == GooseMethod::GET);
+                // The captured error was for the 404 path.
+                assert!(error.1.name == A_404_PATH);
+                // The error was captured the number of times we requested the 404 path.
+                assert!(error.1.occurrences == a_404_metrics.fail_count);
+            }
         }
-        TestType::NoResetMetrics => {
-            // Statistics were not reset, so Goose should report the same number of page
-            // loads as the server actually saw.
-            mock_endpoints[INDEX_KEY].assert_hits(index_metrics.response_time_counter);
-            mock_endpoints[INDEX_KEY].assert_hits(index_metrics.status_code_counts[&status_code]);
-            mock_endpoints[INDEX_KEY].assert_hits(index_metrics.success_count);
-            mock_endpoints[ABOUT_KEY].assert_hits(about_metrics.response_time_counter);
-            mock_endpoints[ABOUT_KEY].assert_hits(about_metrics.status_code_counts[&status_code]);
-            mock_endpoints[ABOUT_KEY].assert_hits(about_metrics.success_count);
+        TestType::NoErrorSummary => {
+            // Goose was configured to not capture any errors.
+            assert!(a_404_errors.is_empty());
         }
     }
 
-    // There should not have been any failures during this test.
+    // The index always loaded successfully.
     assert!(index_metrics.fail_count == 0);
-    assert!(about_metrics.fail_count == 0);
+
+    // The 404 path was always an error.
+    assert!(a_404_metrics.success_count == 0);
 
     // Verify that Goose started the correct number of users.
     assert!(goose_metrics.users == configuration.users.unwrap());
@@ -154,8 +147,8 @@ fn validate_one_taskset(
 // Returns the appropriate taskset needed to build these tests.
 fn get_tasks() -> GooseTaskSet {
     taskset!("LoadTest")
-        .register_task(task!(get_index).set_weight(9).unwrap())
-        .register_task(task!(get_about).set_weight(3).unwrap())
+        .register_task(task!(get_index))
+        .register_task(task!(get_404_path))
 }
 
 // Helper to run all standalone tests.
@@ -167,8 +160,8 @@ fn run_standalone_test(test_type: TestType) {
     let mock_endpoints = setup_mock_server_endpoints(&server);
 
     let mut configuration_flags = match test_type {
-        TestType::NoResetMetrics => vec!["--no-reset-metrics"],
-        TestType::ResetMetrics => vec![],
+        TestType::NoErrorSummary => vec!["--no-error-summary"],
+        TestType::ErrorSummary => vec![],
     };
 
     // Build common configuration elements.
@@ -181,7 +174,7 @@ fn run_standalone_test(test_type: TestType) {
     );
 
     // Confirm that the load test ran correctly.
-    validate_one_taskset(&goose_metrics, &mock_endpoints, &configuration, test_type);
+    validate_error(&goose_metrics, &mock_endpoints, &configuration, test_type);
 }
 
 // Helper to run all standalone tests.
@@ -203,16 +196,16 @@ fn run_gaggle_test(test_type: TestType) {
 
     // Build common configuration elements, adding Manager Gaggle flags.
     let manager_configuration = match test_type {
-        TestType::NoResetMetrics => common_build_configuration(
+        TestType::NoErrorSummary => common_build_configuration(
             &server,
             &mut vec![
                 "--manager",
                 "--expect-workers",
                 &EXPECT_WORKERS.to_string(),
-                "--no-reset-metrics",
+                "--no-error-summary",
             ],
         ),
-        TestType::ResetMetrics => common_build_configuration(
+        TestType::ErrorSummary => common_build_configuration(
             &server,
             &mut vec!["--manager", "--expect-workers", &EXPECT_WORKERS.to_string()],
         ),
@@ -226,7 +219,7 @@ fn run_gaggle_test(test_type: TestType) {
     let goose_metrics = common::run_load_test(manager_goose_attack, Some(worker_handles));
 
     // Confirm that the load test ran correctly.
-    validate_one_taskset(
+    validate_error(
         &goose_metrics,
         &mock_endpoints,
         &manager_configuration,
@@ -235,33 +228,30 @@ fn run_gaggle_test(test_type: TestType) {
 }
 
 #[test]
-// Test a single task set with multiple weighted tasks.
-fn test_one_taskset() {
-    run_standalone_test(TestType::NoResetMetrics);
+// Confirm that errors show up in the summary when enabled.
+fn test_error_summary() {
+    run_standalone_test(TestType::ErrorSummary);
 }
 
 #[test]
 #[cfg_attr(not(feature = "gaggle"), ignore)]
 #[serial]
-// Test a single task set with multiple weighted tasks, in Gaggle mode.
-fn test_one_taskset_gaggle() {
-    run_gaggle_test(TestType::NoResetMetrics);
+// Confirm that errors show up in the summary when enabled, in Gaggle mode.
+fn test_error_summary_gaggle() {
+    run_gaggle_test(TestType::ErrorSummary);
 }
 
 #[test]
-// Test a single task set with multiple weighted tasks, enable --no-reset-metrics.
-fn test_one_taskset_reset_metrics() {
-    run_standalone_test(TestType::ResetMetrics);
+// Confirm that errors do not show up in the summary when --no-error-summary is enabled.
+fn test_no_error_summary() {
+    run_standalone_test(TestType::NoErrorSummary);
 }
 
-/* @TODO: @FIXME: Goose is not resetting metrics when running in Gaggle mode.
- * Issue: https://github.com/tag1consulting/goose/issues/193
 #[test]
 #[cfg_attr(not(feature = "gaggle"), ignore)]
 #[serial]
-// Test a single task set with multiple weighted tasks, enable --no-reset-metrics
+// Confirm that errors do not show up in the summary when --no-error-summary is enabled,
 // in Gaggle mode.
-fn test_one_taskset_reset_metrics_gaggle() {
-    run_gaggle_test(TestType::ResetMetrics);
+fn test_no_error_summary_gaggle() {
+    run_gaggle_test(TestType::NoErrorSummary);
 }
-*/

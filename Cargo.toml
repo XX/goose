@@ -1,6 +1,6 @@
 [package]
 name = "goose"
-version = "0.10.9-dev"
+version = "0.10.10-dev"
 authors = ["Jeremy Andrews <jeremy@tag1consulting.com>"]
 edition = "2018"
 description = "A load testing tool inspired by Locust."
@@ -42,5 +42,5 @@ gaggle = ["nng"]
 rustls = ["reqwest/rustls-tls"]
 
 [dev-dependencies]
-httpmock = "0.4"
+httpmock = "0.5"
 serial_test = "0.5"
